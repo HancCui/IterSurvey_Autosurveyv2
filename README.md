@@ -181,7 +181,7 @@ Results are stored in:
 ```
 
 ---
-
+<!-- 
 ### 2️⃣ Evaluate a Generated Survey
 
 ```bash
@@ -206,7 +206,7 @@ Evaluation results:
 ./output/{topic}/evaluation.json
 ```
 
----
+--- -->
 
 ## 🧩 Key Modules
 
