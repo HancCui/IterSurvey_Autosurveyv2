@@ -1,0 +1,91 @@
+\begin{figure}
+\tiny
+        \begin{forest}
+            for tree={
+                forked edges,
+                grow'=0,
+                draw,
+                rounded corners,
+                node options={align=center,},
+                text width=1.2cm,
+                s sep=4pt,
+                calign=child edge, calign child=(n_children()+1)/2,
+                % l sep = 10 pt,
+                % l=40pt
+            },
+            [Prompting Method, fill=gray!45, parent
+            % Pre-trained model
+                [1. Pre-trained Models, for tree={ pretrain}
+                    [1.1 Left-to-Right LM,  pretrain]
+                    [1.2 Masked LM, pretrain]
+                    [1.3 Prefix LM,  pretrain]
+                    [1.4 Encoder-Decoder, pretrain]
+                ]
+                % Template
+                [2. Prompt Engineering, for tree={fill=red!45,template}
+                    [2.1 Shape,  template
+                        [2.1.1 Cloze, template]
+                        [2.1.2 Prefix, template]
+                    ]
+                    % [Natural Language Tokens, template
+                    %     [Yes, template]
+                    %     [No, template]
+                    % ]
+                    [2.2 Human Effort,  template
+                        [2.2.1 Hand-crafted, template]
+                        [2.2.2 Automated, template
+                            [2.2.2.1 Discrete, template]
+                            [2.2.2.2 Continuous, template]
+                        ]
+                    ]
+                    % [Selection, template
+                    %     [Yes, template]
+                    %     [No, template]
+                    % ]
+                ]
+                % Answer
+                [3. Answer Engineering, for tree={fill=blue!45, answer}
+                    [3.1 Shape, answer
+                        [3.1.1 Token, answer]
+                        [3.1.2 Span, answer]
+                        [3.1.3 Sentence, answer]
+                    ]
+                    % [Natural Language Tokens, answer
+                    %     [Yes, answer]
+                    %     [No, answer]
+                    % ]
+                    [3.2 Human Effort,  answer
+                        [3.2.1 Hand-crafted, answer]
+                        [3.2.2 Automated, answer
+                            [3.2.2.1 Discrete, answer]
+                            [3.2.2.2 Continuous, answer]
+                        ]
+                    ]
+                ]
+                % Multipe Prompt
+                [4. Multi-Prompt Learning, for tree={multiple}
+                    [4.1 Prompt Ensemble, multiple]
+                    [4.2 Prompt Augmentation, multiple]
+                    [4.3 Prompt Composition,  multiple ]
+                    [4.4 Prompt Decomposition,  multiple]
+                    [4.5 Prompt Sharing,  multiple]
+                ]
+                % Tuning Srategy
+                [5. Prompt-based Training Strategies, for tree={tuning}
+                    [5.1 Parameter Updating, tuning
+                            [5.1.1 Promptless Fine-tuning, tuning]
+                            [5.1.2 Tuning-free Prompting, tuning]
+                            [5.1.3 Fixed-LM Prompt Tuning, tuning]
+                            [5.1.4 Fixed-prompt LM Tuning, tuning]
+                            [5.1.5 Prompt+LM Tuning, tuning]
+                    ]
+                    [5.2 Training Sample Size,  tuning
+                            [5.2.1 Few/zero-shot, tuning]
+                            [5.2.2 Full-data, tuning]
+                    ]
+                ]
+            ]
+        \end{forest}
+            \caption{Typology of prompting methods.}
+            \label{fig:typo-prompt}
+\end{figure}

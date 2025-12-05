@@ -1,0 +1,130 @@
+# ========================================
+# Python
+# ========================================
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+autosurvey.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+**/venv/
+env/
+ENV/
+.venv/
+
+# ========================================
+# IDE & Editor
+# ========================================
+.vscode/
+.history/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ========================================
+# Project Specific - Output & Results
+# ========================================
+# All output directories
+output/
+output*/
+output_*/
+output_ablation*/
+output_august*/
+output_ood*/
+output_gpt*/
+output_debug/
+
+# Evaluation results
+eval/
+examples/
+
+# ========================================
+# Project Specific - Data & Cache
+# ========================================
+# Large data files
+arxiv_txt/
+arxiv_txt.tar.gz
+download/
+database/
+cache/
+
+# ========================================
+# Project Specific - Logs
+# ========================================
+logs/
+*.log
+evaluate.log
+wandb/
+swanlog/
+
+# ========================================
+# Project Specific - Temporary Files
+# ========================================
+temp/
+*.jpg
+*.png
+debug_image.*
+
+# ========================================
+# Project Specific - Generated Content
+# ========================================
+topic_markdown/
+themes/
+
+# ========================================
+# Project Specific - Test Files
+# ========================================
+# Test topics
+*TestTopics*.txt
+test_path*.txt
+
+# Test directories
+test_downloads/
+test_mineru/
+
+# Test scripts (keep main test.py but ignore specific test files)
+test_structured_output*.py
+test_script.py
+test1.py
+
+# ========================================
+# Third-party Libraries & Submodules
+# ========================================
+MinerU/
+LLMxMapReduce/
+proxy_pool/
+python-node-deepresearch/
+SurveyX/
+P2P/
+vllm/
+
+# ========================================
+# Deployment & Cloud
+# ========================================
+.vercel/
+
+# ========================================
+# Miscellaneous
+# ========================================
+# Backup files
+*.bak
+*copy.py
+*copy.txt
+src_legend/
+
+# Specific files
+022_pass.txt
+1
+subsection-summary.txt
+telegram_logger.py
+setup.sh

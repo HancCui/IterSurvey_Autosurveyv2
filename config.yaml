@@ -1,0 +1,4 @@
+# 多机多进程配置
+num_task_per_device: 2  # 每个设备运行的任务数
+task_timeout: 5         # 任务超时时间（秒）
+max_retries: 3         # 任务最大重试次数 
