@@ -4,6 +4,7 @@ import os
 import shutil
 import re
 import glob
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def extract_arxiv_id(markdown_text):
     # 正则表达式匹配 [arxiv_id] 格式的引用，只匹配包含arXiv ID格式的中括号
@@ -469,7 +470,7 @@ def generate_markdown_code(survey, markdown_path, api_model, db):
     section_markdown_list.append(f"# {survey.title}")
     section_markdown_list.append(f"\n{survey.abstract}")  # Abstract作为内容而不是标题
 
-    for section_idx, section in enumerate(survey.sections):
+    def _process_single_section(section_idx, section):
         print(f"Generating markdown code for section {section_idx}...")
         section_title_w_fig = f"## {section.title}\n\n"
         if section.figs:
@@ -497,8 +498,19 @@ def generate_markdown_code(survey, markdown_path, api_model, db):
         prompt = TO_MD_PROMPT.replace("{{SECTION_CONTENT}}", section_content)
         response = api_model.chat(prompt)
         section_content_markdown = extract_markdown_code(response)
+        return section_idx, section_content_markdown
 
-        section_markdown_list.append(section_content_markdown)
+    futures = []
+    ordered_results = {i: None for i in range(len(survey.sections))}
+    with ThreadPoolExecutor(max_workers=min(8, max(1, os.cpu_count() or 24))) as executor:
+        for section_idx, section in enumerate(survey.sections):
+            futures.append(executor.submit(_process_single_section, section_idx, section))
+        for future in as_completed(futures):
+            idx, content_md = future.result()
+            ordered_results[idx] = content_md
+
+    for i in range(len(survey.sections)):
+        section_markdown_list.append(ordered_results[i])
 
     # 匹配所有 [arxiv_id] 格式的引用并替换为数字引用格式
     # 只匹配包含arXiv ID格式的中括号内容，避免匹配其他中括号文本

@@ -21,6 +21,7 @@ from src.utils import collate_text_with_imgs
 
 from src.agents.outline_writer import *
 from src.agents.utils import Section, Subsection
+from src.cost_tracker import track_time, track_token_usage, Timer, PriceTracker
 
 import random
 
@@ -70,6 +71,45 @@ def is_arxiv_id(s: str) -> bool:
     return False
 
 
+@track_time("[SubsectionWriter] Retrieve Papers", excluded=True)
+def retrieve_papers(retrieved_paper_infos, unprocessed_paper_ids, use_abs, db):
+    """
+    处理检索到的论文信息，根据use_abs选择使用摘要或全文
+
+    Args:
+        retrieved_paper_infos: 从数据库检索到的论文基本信息列表
+        unprocessed_paper_ids: 待处理的论文ID列表
+        use_abs: 是否使用摘要
+        db: 数据库对象（仅在use_abs=False时使用）
+
+    Returns:
+        tuple: (paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs)
+    """
+    paper_titles = [r['title'] for r in retrieved_paper_infos]
+
+    if use_abs:
+        paper_content = [r['abs'] for r in retrieved_paper_infos]
+        filtered = [(pid, title, content) for pid, title, content in zip(unprocessed_paper_ids, paper_titles, paper_content) if content.strip() != ""]
+        if filtered:
+            paper_ids, paper_titles, paper_content = map(list, zip(*filtered))
+        else:
+            paper_ids, paper_titles, paper_content = [], [], []
+        paper_bibs = [[] for _ in range(len(paper_ids))]
+        paper_imgs = [{} for _ in range(len(paper_ids))]
+    else:
+        papers = db.get_paper_from_ids(unprocessed_paper_ids, max_len=80000)
+        paper_content = [p['text'] for p in papers]
+        paper_bibs = [p['bibs'] for p in papers]
+        paper_imgs = [p['imgs'] for p in papers]
+        filtered = [(pid, title, content, bibs, imgs) for pid, title, content, bibs, imgs in zip(unprocessed_paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs) if content.strip() != ""]
+        if filtered:
+            paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs = map(list, zip(*filtered))
+        else:
+            paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs = [], [], [], [], []
+
+    return paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs
+
+
 class subsectionWriter():
 
     def __init__(self, model, api_key, api_url, database, max_len = 11000, use_abs=False, input_graph = False, vision_model = None, vision_api_key=None, vision_api_url=None) -> None:
@@ -86,11 +126,10 @@ class subsectionWriter():
         self.paper_ids_to_content = {}
         self.input_token_usage, self.output_token_usage = 0, 0
 
-    def get_writer_usage(self):
-        current_usage = self.api_model.token_counter.get_total_usage()
-        return current_usage
+    def get_token_usage(self):
+        return self.api_model.token_counter.get_total_usage()
 
-    def write(self, topic, outline, rag_num = 30, max_related_papers=0, subsection_len = 500):
+    def write(self, topic, outline, rag_num = 30, max_related_papers=0, subsection_len = 500, saving_path=None):
         # Get database
         """
         [
@@ -167,30 +206,26 @@ class subsectionWriter():
                 subsection.paper_ids = final_ids
                 # print(f"Get {len(section_references_ids[i][subsec_idx])} papers")
 
+        # 将all_references写入到json文件，保存起来
+        if saving_path is not None:
+            # 确保目录存在
+            os.makedirs(saving_path, exist_ok=True)
+
+            references_file = os.path.join(saving_path, f"section_all_references.json")
+
+            # 保存为 JSON 格式
+            with open(references_file, 'w', encoding='utf-8') as f:
+                json.dump(all_references, f, indent=2, ensure_ascii=False)
+
+            print(f"All references saved to: {references_file}")
+
         # 把根据 section 的 description 检索的 paper_ids 检索一下
         unprocessed_paper_ids = [k for k in all_references if k not in self.paper_ids_to_cards]
         retrieved_paper_infos = self.db.get_paper_info_from_ids(list(set(unprocessed_paper_ids)))
 
-        paper_titles = [r['title'] for r in retrieved_paper_infos]
-        if self.use_abs:
-            paper_content = [r['abs'] for r in retrieved_paper_infos]
-            filtered = [(pid, title, content) for pid, title, content in zip(unprocessed_paper_ids, paper_titles, paper_content) if content.strip() != ""]
-            if filtered:
-                paper_ids, paper_titles, paper_content = map(list, zip(*filtered))
-            else:
-                paper_ids, paper_titles, paper_content = [], [], []
-            paper_bibs = [[] for _ in range(len(paper_ids))]
-            paper_imgs = [{} for _ in range(len(paper_ids))]
-        else:
-            papers = self.db.get_paper_from_ids(unprocessed_paper_ids, max_len=80000)
-            paper_content = [p['text'] for p in papers]
-            paper_bibs = [p['bibs'] for p in papers]
-            paper_imgs = [p['imgs'] for p in papers]
-            filtered = [(pid, title, content, bibs, imgs) for pid, title, content, bibs, imgs in zip(unprocessed_paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs) if content.strip() != ""]
-            if filtered:
-                paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs = map(list, zip(*filtered))
-            else:
-                paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs = [], [], [], [], []
+        paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs = retrieve_papers(
+            retrieved_paper_infos, unprocessed_paper_ids, self.use_abs, self.db
+        )
 
         for paper_id, title, content, bibs, imgs in zip(paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs):
             self.paper_ids_to_content[paper_id] = (title, content, bibs, imgs)
@@ -263,15 +298,21 @@ class subsectionWriter():
         #     i, new_section = process_single_section(task)
         #     section_content_list.append(new_section)
 
-        # 使用ThreadPoolExecutor并发处理
-        section_content_list = [[] for _ in range(len(section_tasks))]
-        with ThreadPoolExecutor(max_workers=16) as executor:
-            futures = {executor.submit(process_single_section, task): task for task in section_tasks}
+        # with Timer("Writing each Subsection"):
+            # 使用ThreadPoolExecutor并发处理
+        @track_time("[SubsectionWriter] Write Sections")
+        def write_each_section(section_tasks=section_tasks):
+            section_content_list = [[] for _ in range(len(section_tasks))]
+            with ThreadPoolExecutor(max_workers=64) as executor:
+                futures = {executor.submit(process_single_section, task): task for task in section_tasks}
 
-            for future in tqdm(as_completed(futures), total=len(section_tasks), desc="Writing sections"):
-                i, result = future.result()
-                section_content_list[i] = result # type: ignore
+                for future in tqdm(as_completed(futures), total=len(section_tasks), desc="Writing sections"):
+                    i, result = future.result()
+                    section_content_list[i] = result # type: ignore
 
+            return section_content_list
+        
+        section_content_list = write_each_section(section_tasks)
         print("Generated Raw Survey")
 
         raw_survey = Survey(
@@ -354,6 +395,8 @@ class subsectionWriter():
             print(f"Paper text: {paper_text}")
         return paper_card if paper_card else None
 
+    @track_time("[SubsectionWriter] Batch Generate Paper Cards", excluded=True)
+    @track_token_usage("[SubsectionWriter] Batch Generate Paper Cards")
     def batch_generate_paper_cards(self, topic, paper_ids):
         # paper_content_list = [a.get("text", a['abs']) for a in paper_dict]
         print(f"******Summarizing {len(paper_ids)} Papers******")
@@ -373,7 +416,7 @@ class subsectionWriter():
 
         paper_id_to_cards_map = {}
 
-        with ThreadPoolExecutor(max_workers=16) as executor:
+        with ThreadPoolExecutor(max_workers=128) as executor:
             futures = {executor.submit(process_paper, item): item for item in paper_ids}
 
             for future in tqdm(as_completed(futures), total=len(paper_ids), desc="Summarizing papers"):
@@ -544,6 +587,7 @@ class subsectionWriter():
                             )
                         print(f"Finally we use {len(current_paper_cards)} paper cards for section-{idx}.subsection-{sub_sec_idx}: {sub_sec.title}.")
 
+                        print(f"Section Writing prompt ")
                         subsection_content = self.api_model.chat(section_writing_prompt, temperature=0.6, check_cache=False) # type: ignore
 
                         # # Simple check for subsection markers
@@ -586,6 +630,13 @@ class subsectionWriter():
 
                     # 2.2 call the model
                     response_section_summary = self.api_model.chat(section_summary_prompt, temperature=0.6, check_cache=False) # type: ignore
+
+                    # 如果 section.paper_ids 为空，说明 paper_ids 只在 subsection 中
+                    # 这种情况下，从 section summary 中移除所有引用标记
+                    if len(section.paper_ids) == 0:
+                        digit_cite_pattern = re.compile(r'\[(\d+(?:\s*,\s*\d+)*)\]')
+                        response_section_summary = digit_cite_pattern.sub('', response_section_summary)
+                        print(f"Section '{section.title}': Removed citations from section summary (section has no paper_ids, only subsections have paper_ids)")
 
                     # Simple check for subsection markers
                     # if '### ' in response_section_summary.summary or '## ' in response_section_summary.summary:
@@ -655,12 +706,12 @@ def parse_args():
     return args
 
 
-def write_subsection(topic, model, outline, subsection_len, rag_num, db, api_key, api_url, use_abs, max_len, input_graph = False):
+def write_subsection(topic, model, outline, subsection_len, rag_num, db, api_key, api_url, use_abs, max_len, input_graph = False, saving_path=None):
 
     subsection_writer = subsectionWriter(model=model, api_key=api_key, api_url = api_url, database=db, max_len = max_len, input_graph = input_graph)
     #  def write(self, topic, outline, rag_num = 30, subsection_len = 500):
-    raw_survey = subsection_writer.write(topic, outline, rag_num = rag_num, subsection_len = subsection_len)
-    price = subsection_writer.get_writer_usage()
+    raw_survey = subsection_writer.write(topic, outline, rag_num = rag_num, subsection_len = subsection_len, saving_path=saving_path)
+    price = subsection_writer.get_token_usage()
     print(f"Write the subsection cost: {price}")
 
     return raw_survey, price
@@ -681,8 +732,8 @@ if __name__ == "__main__":
     from src.agents.outline_writer import DynamicOutlineWriter, PaperCard, Action, Survey
     from src.database import database
 
-    # NOTE: Update path to your actual outline file
-    outline_path = os.environ.get("OUTLINE_PATH", "./output/outline.pkl")
+
+    outline_path = "xxx.pkl"
 
     db = database(converter_workers=2)
     outline_writer = DynamicOutlineWriter.load_state(outline_path, db)
@@ -697,7 +748,6 @@ if __name__ == "__main__":
 
     raw_survey, subsection_price_all = write_subsection(args.topic, args.model, outline, args.subsection_len, args.rag_num, db, args.api_key, args.api_url, args.use_abs, args.max_len, input_graph = args.input_graph)
 
-    os.makedirs("./output/tmp", exist_ok=True)
     with open(f"./output/tmp/_section_content_{time_str}.txt", 'w') as f:
         # for section in raw_survey.sections:
         #     f.write("## "+str(section)+'\n')

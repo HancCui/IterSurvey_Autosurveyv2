@@ -254,11 +254,13 @@ def calculate_outline_similarity(outline_a: str, outline_b: str) -> float:
 
     # 分段比较：按章节分割
     def split_sections(outline):
-        # 按 ## 分割章节
-        sections = re.split(r'##\s+', outline)
-        # 过滤空章节并清理
-        sections = [s.strip() for s in sections if s.strip()]
-        return sections
+        # 仅提取以井号开头的标题行（#、##、### 等），使用 startswith 简化实现
+        headings = []
+        for line in outline.splitlines():
+            l = line.lstrip()
+            if l.startswith('#'):
+                headings.append(l)
+        return headings
 
     # 计算集合相似度（Jaccard相似度）
     def jaccard_similarity(set_a, set_b):
@@ -293,8 +295,8 @@ def calculate_outline_similarity(outline_a: str, outline_b: str) -> float:
     text_similarity = matcher.ratio()
 
     # 2. 章节结构相似度
-    sections_a = set(split_sections(norm_a))
-    sections_b = set(split_sections(norm_b))
+    sections_a = set(split_sections(outline_a))
+    sections_b = set(split_sections(outline_b))
     structure_similarity = jaccard_similarity(sections_a, sections_b)
 
     # 3. 关键词相似度
@@ -303,8 +305,8 @@ def calculate_outline_similarity(outline_a: str, outline_b: str) -> float:
     # 4. 综合相似度（加权平均）
     weights = {
         'text': 0.3,      # 文本相似度权重
-        'structure': 0.4, # 结构相似度权重
-        'keyword': 0.3    # 关键词相似度权重
+        'structure': 0.6, # 结构相似度权重
+        'keyword': 0.1    # 关键词相似度权重
     }
 
     overall_similarity = (

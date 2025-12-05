@@ -1,5 +1,6 @@
 #%%
 import os
+import threading
 import numpy as np
 import torch
 from transformers import AutoModel, AutoTokenizer,  AutoModelForSequenceClassification
@@ -8,6 +9,7 @@ import h5py
 import re
 import datetime
 from src.utils import tokenCounter, validate_pdf, download_paper, extract_reference, validate_html, collate_text_with_bibtex, collate_bibkey
+from src.cost_tracker import track_time, TimeTracker, format_duration
 import json
 from tqdm import tqdm
 import faiss
@@ -114,7 +116,7 @@ def replace_images_with_id(text, images, id):
     return text, images
 
 class database():
-    def __init__(self, db_path = "./IterSurvey_Autosurveyv2/database", mineru_cache_path=None, embedding_model = "", api_concurrent_limit = 4, end_time=None, mineru_port = 8000, converter_workers = 4) -> None:
+    def __init__(self, db_path = "./IterSurvey_Autosurveyv2/database", mineru_cache_path=None, embedding_model = "", api_concurrent_limit = 64, end_time=None, mineru_port = 8000, converter_workers = 4) -> None:
 
         self.embedding_model = SentenceTransformer(embedding_model, trust_remote_code=True, model_kwargs={"torch_dtype": torch.bfloat16})
 
@@ -122,6 +124,7 @@ class database():
 
         self.db = TinyDB(f'{db_path}/arxiv_paper_db.json')
         self.table = self.db.table('cs_paper_info')
+        self._db_lock = threading.RLock()  # Thread-safe lock for TinyDB access
 
         self.end_time = end_time if end_time else "2512"
 
@@ -311,7 +314,8 @@ class database():
         """
         resolved_ids = []
         # 一次性查询所有ID，避免多次数据库查询
-        existing_ids = set(r['id'] for r in self.table.search(self.User.id.one_of(ids)))
+        with self._db_lock:
+            existing_ids = set(r['id'] for r in self.table.search(self.User.id.one_of(ids)))
 
         for query_id in ids:
             # 先检查精确匹配
@@ -338,7 +342,8 @@ class database():
 
     def get_date_from_ids(self, ids):
         resolved_ids = self._resolve_ids(ids)
-        result = self.table.search(self.User.id.one_of(resolved_ids))
+        with self._db_lock:
+            result = self.table.search(self.User.id.one_of(resolved_ids))
         id_to_result = {r['id']: r for r in result}
 
         dates = []
@@ -352,7 +357,8 @@ class database():
 
     def get_title_from_ids(self, ids):
         resolved_ids = self._resolve_ids(ids)
-        result = self.table.search(self.User.id.one_of(resolved_ids))
+        with self._db_lock:
+            result = self.table.search(self.User.id.one_of(resolved_ids))
         id_to_result = {r['id']: r for r in result}
 
         titles = []
@@ -366,7 +372,8 @@ class database():
 
     def get_abs_from_ids(self, ids):
         resolved_ids = self._resolve_ids(ids)
-        result = self.table.search(self.User.id.one_of(resolved_ids))
+        with self._db_lock:
+            result = self.table.search(self.User.id.one_of(resolved_ids))
         id_to_result = {r['id']: r for r in result}
 
         abs_l = []
@@ -380,7 +387,8 @@ class database():
 
     def get_paper_info_from_ids(self, ids):
         resolved_ids = self._resolve_ids(ids)
-        result = self.table.search(self.User.id.one_of(resolved_ids))
+        with self._db_lock:
+            result = self.table.search(self.User.id.one_of(resolved_ids))
         id_to_result = {r['id']: r for r in result}
 
         sorted_result = []
@@ -397,7 +405,8 @@ class database():
         candidate_ids = self.get_ids_from_query(title, candidate_num, title=True)
         if not candidate_ids:
             return []
-        candidate_records = self.table.search(self.User.id.one_of(candidate_ids))
+        with self._db_lock:
+            candidate_records = self.table.search(self.User.id.one_of(candidate_ids))
         candidate_titles = [r['title'] for r in candidate_records]
         candidate_id_map = {r['title']: r['id'] for r in candidate_records}
         # 使用rapidfuzz进行更快的模糊匹配
@@ -422,7 +431,8 @@ class database():
         unique_candidate_ids = list(set([c_id for cand_ids in candidate_ids for c_id in cand_ids]))
 
         # 一次性查询所有候选记录，而不是循环查询
-        candidate_records = self.table.search(self.User.id.one_of(unique_candidate_ids))
+        with self._db_lock:
+            candidate_records = self.table.search(self.User.id.one_of(unique_candidate_ids))
 
         # 创建映射字典以提高查找效率
         candidate_titles = [r['title'] for r in candidate_records]

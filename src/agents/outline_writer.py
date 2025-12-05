@@ -13,7 +13,7 @@ import random
 import pickle
 import sys
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from rich.console import Console
 from rich.progress import Progress, TextColumn, BarColumn, SpinnerColumn
@@ -27,6 +27,7 @@ from src.database import database
 from src.utils import tokenCounter, collate_text_with_imgs
 from src.prompt import OUTLINE_UPDATE_PROMPT, PAPER_CARD_PROMPT, QUERY_FILTER_PROMPT, DECIDE_QUERY_PROMPT, QUERY_GENERATION_PROMPT, REFINE_OUTLINE_PROMPT, POST_PAPER_MAPPING_PROMPT
 from src.json_schemas import Outline_schema, PaperCard_schema, QueryFilter_schema, DecideQuery_schema, QueryGeneration_schema, PaperOutlineMapping_schema, ResearchQueryItem
+from src.cost_tracker import track_time, track_token_usage, PriceTracker
 
 
 class DynamicOutlineWriter:
@@ -67,9 +68,10 @@ class DynamicOutlineWriter:
 
         self.history = []  # 历史记录
 
-    def get_writer_usage(self):
+    def get_token_usage(self):
         """获取API使用量"""
         return self.api_model.token_counter.get_total_usage()
+
 
     def _retrieve_papers(self, query, num=50):
         """获取论文内容"""
@@ -96,6 +98,32 @@ class DynamicOutlineWriter:
             else:
                 paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs = [], [], [], [], []
         return paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs
+
+    @track_time("[OutlineWriter] Retrieve Queries", excluded=True)
+    def _retrieve_queries(self, queries, retrieve_papers_num=20):
+        """并行执行多个查询检索论文
+
+        Args:
+            queries: 查询列表
+            retrieve_papers_num: 每个查询检索的论文数量
+
+        Returns:
+            results: [(query, paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs), ...]
+        """
+        def _retrieve_single_query(query):
+            paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs = self._retrieve_papers(
+                query,
+                num=retrieve_papers_num
+            )
+            return query, paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs
+
+        results = []
+        with ThreadPoolExecutor(max_workers=min(24, len(queries))) as executor:
+            futures = [executor.submit(_retrieve_single_query, q) for q in queries]
+            for future in as_completed(futures):
+                results.append(future.result())
+
+        return results
 
     def _update_paper_pool(self, paper_ids, paper_titles, paper_content, paper_bibs, paper_imgs):
         """更新论文池"""
@@ -136,8 +164,12 @@ class DynamicOutlineWriter:
             prompt = collate_text_with_imgs(prompt, paper_imgs)
         return prompt
 
-    def _get_update_outline_prompt(self, topic, existing_outline, current_query, current_paper_ids, max_sections=10):
-        """获取更新outline的prompt"""
+    def _get_update_outline_prompt(self, topic, existing_outline, current_queries, current_paper_ids, max_sections=10):
+        """获取更新outline的prompt
+        
+        Args:
+            current_queries: 可以是单个 ResearchQueryItem 或 ResearchQueryItem 列表
+        """
 
         if isinstance(topic, dict):
             description = topic.get('description', "")
@@ -154,28 +186,64 @@ class DynamicOutlineWriter:
             new_papers_content += card.to_str() + "\n"
             new_papers_content += "-----\n"
 
+        # 支持单个或多个 queries
+        if not isinstance(current_queries, list):
+            current_queries = [current_queries]
+        
+        query_str = ""
+        for i, query in enumerate(current_queries, 1):
+            if len(current_queries) > 1:
+                query_str += f"Query {i}:\n"
+            query_str += f"Search Query: {query.query}\nQuery Target: {query.target}\n"
+            if i < len(current_queries):
+                query_str += "\n"
+
         prompt = OUTLINE_UPDATE_PROMPT.format(
             topic=topic,
             description=description,
             existing_outline=existing_outline,
-            query=f"Search Query: {current_query.query}\nQuery Target: {current_query.target}",
+            query=query_str.strip(),
             new_papers=new_papers_content.strip(),
             max_sections=max_sections
         )
         return prompt
 
-    def _update_outline(self, topic, existing_outline, current_query, current_paper_ids, max_sections=10, description=""):
-        """基于新发现更新outline"""
-        while True:
-            prompt = self._get_update_outline_prompt(topic, existing_outline, current_query, current_paper_ids, max_sections)
-            res = self.api_model.chat_structured(prompt, Outline_schema)
+    @track_time("[OutlineWriter] Update Outline")
+    def _update_outline(self, topic, existing_outline, current_queries, current_paper_ids, max_sections=10, description=""):
+        """基于新发现更新outline
+        
+        Args:
+            current_queries: 可以是单个 ResearchQueryItem 或 ResearchQueryItem 列表
+        """
+        max_retries = 5
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            prompt = self._get_update_outline_prompt(topic, existing_outline, current_queries, current_paper_ids, max_sections)
+            res = self.api_model.chat_structured(prompt, Outline_schema, check_cache=False)
+            
             if res is not None:
-                break
+                if self.debug:
+                    print(f"\n\nPrompt length: {len(prompt)} chars")
+                    print(f"Papers used: {len(current_paper_ids)}")
+                return res
             else:
-                current_paper_ids = current_paper_ids[:-2]
+                retry_count += 1
+                if self.debug:
+                    print(f"Retry {retry_count}/{max_retries}: API call failed, reducing papers...")
+                
+                # 每次失败减少 20% 的论文
+                reduce_count = max(1, len(current_paper_ids) // 5)
+                current_paper_ids = current_paper_ids[:-reduce_count]
+                
                 if len(current_paper_ids) == 0:
+                    if self.debug:
+                        print("No papers left after retries, outline update failed")
                     return None
-        return res
+        
+        if self.debug:
+            print(f"Failed to generate outline after {max_retries} retries")
+        return None
 
     def _parse_outline(self, outline_dict):
         """解析outline"""
@@ -192,12 +260,15 @@ class DynamicOutlineWriter:
             res = self.api_model.chat_structured(prompt, PaperCard_schema)
         return res
 
+    @track_time("[OutlineWriter] Update Paper Cards", excluded=True)
+    @track_token_usage("[OutlineWriter] Update Paper Cards")
     def _update_paper_cards(self, topic, max_related_papers=5):
         """更新论文卡片"""
         # 获取未处理的论文ID
         unprocessed_paper_ids = [paper_id for paper_id in self.paper_ids_pool if paper_id not in self.paper_ids_to_cards.keys()]
 
         if len(unprocessed_paper_ids) == 0:
+            print("No unprocessed paper card")
             return
 
         # 已处理的论文ID集合，用于线程同步
@@ -216,6 +287,7 @@ class DynamicOutlineWriter:
 
             # 如果成功生成卡片
             if paper_card is not None:
+                print(f"Generate paper card for {paper_id} successly.")
                 self.paper_ids_to_cards[paper_id] = paper_card
                 processed_ids.add(paper_id)
             else:
@@ -223,7 +295,7 @@ class DynamicOutlineWriter:
             return 1
 
         # 创建线程池
-        with ThreadPoolExecutor(max_workers=16) as executor:
+        with ThreadPoolExecutor(max_workers=128) as executor:
             # 分批次处理论文
             futures = []
             # 将所有论文分批提交给线程池
@@ -264,6 +336,8 @@ class DynamicOutlineWriter:
             paper_card.related_papers = success_related_papers
             self.paper_ids_to_cards[paper_id] = paper_card
 
+
+
     def _get_next_action(self, outline_batch_size):
         if len(self.action_pool) == 0:
             return None, None
@@ -273,9 +347,47 @@ class DynamicOutlineWriter:
             if action.paper_num() == 0:
                 self.action_pool.pop(0)
             return query, paper_ids
+    
+    def _get_all_actions(self, max_papers_per_update=200):
+        """获取 action_pool 中所有的 papers 和 queries
+        
+        Args:
+            max_papers_per_update: 单次更新最多使用的论文数量，避免超过 context 限制
+        
+        Returns:
+            queries: 所有 queries 的列表
+            paper_ids: 所有去重后的 paper_ids
+        """
+        if len(self.action_pool) == 0:
+            return None, None
+        
+        all_queries = []
+        all_paper_ids = []
+        
+        # 收集所有 action 中的 queries 和 papers
+        while len(self.action_pool) > 0:
+            action = self.action_pool.pop(0)
+            all_queries.append(action.query)
+            all_paper_ids.extend(action.paper_ids)
+        
+        # 去重 paper_ids（保持顺序）
+        seen = set()
+        unique_paper_ids = []
+        for pid in all_paper_ids:
+            if pid not in seen:
+                seen.add(pid)
+                unique_paper_ids.append(pid)
+        # 限制论文数量以避免超过 context 限制
+        if len(unique_paper_ids) > max_papers_per_update:
+            if self.debug:
+                print(f"Warning: Too many papers ({len(unique_paper_ids)}), truncating to {max_papers_per_update}")
+            random.shuffle(unique_paper_ids)
+            unique_paper_ids = unique_paper_ids[:max_papers_per_update]
+        
+        return all_queries, unique_paper_ids
 
+    @track_time("[OutlineWriter] Generate Query")
     def _generate_query(self, topic, max_query_num=5):
-
         if isinstance(topic, dict):
             description = topic.get('description', "")
             topic = topic.get('topic', "")
@@ -336,6 +448,7 @@ class DynamicOutlineWriter:
             flattened_queries.append(item)
         return flattened_queries
 
+    @track_time("[OutlineWriter] Decide Query")
     def _decide_query(self, topic, current_outline):
 
         if isinstance(topic, dict):
@@ -356,7 +469,8 @@ class DynamicOutlineWriter:
         if res is None:
             return None, False
         return res.thinking, res.decision
-
+    
+    @track_time("[OutlineWriter] Refine outline")
     def _refine_outline(self, topic, updated_outline, max_sections=10):
         if isinstance(topic, dict):
             description = topic.get('description', "")
@@ -382,6 +496,7 @@ class DynamicOutlineWriter:
                 retry_num += 1
         return None
 
+    @track_time("[OutlineWriter] Post Paper Mapping")
     def _post_paper_mapping(self, topic, outline, mapping_batch_size = 10):
         if isinstance(topic, dict):
             description = topic.get('description', "")
@@ -429,7 +544,7 @@ class DynamicOutlineWriter:
 
         batches = [self.paper_ids_pool[i:i+mapping_batch_size] for i in range(0, len(self.paper_ids_pool), mapping_batch_size)]
 
-        with ThreadPoolExecutor(max_workers=16) as executor:
+        with ThreadPoolExecutor(max_workers=64) as executor:
             batch_results = []
             for result in tqdm(executor.map(process_batch, batches), total=len(batches), desc="Mapping papers to outline sections"):
                 batch_results.append(result)
@@ -503,11 +618,31 @@ class DynamicOutlineWriter:
         return related_paper_ids, related_paper_titles, related_paper_content, related_paper_bibs, related_paper_imgs
 
     def _add_related_paper_to_action(self, outline_related_paper_num=2):
+        """为第一个 action 添加相关论文"""
+        if len(self.action_pool) == 0 or outline_related_paper_num <= 0:
+            return
         action = self.action_pool[0]
         paper_ids = action.paper_ids
         related_paper_ids, related_paper_titles, related_paper_content, related_paper_bibs, related_paper_imgs = self._extract_related_papers(paper_ids, outline_related_paper_num=outline_related_paper_num)
         self._update_paper_pool(related_paper_ids, related_paper_titles, related_paper_content, related_paper_bibs, related_paper_imgs)
         action.add_related_paper_ids(related_paper_ids)
+    
+    def _add_related_papers_to_all_actions(self, outline_related_paper_num=2):
+        """为所有 actions 添加相关论文"""
+        # 如果 outline_related_paper_num 为 0，不提取相关论文，直接标记为已处理
+        if outline_related_paper_num <= 0:
+            for action in self.action_pool:
+                if not action.added_related_paper_ids:
+                    action.added_related_paper_ids = True
+            return
+        
+        for action in self.action_pool:
+            if action.added_related_paper_ids:
+                continue
+            paper_ids = action.paper_ids
+            related_paper_ids, related_paper_titles, related_paper_content, related_paper_bibs, related_paper_imgs = self._extract_related_papers(paper_ids, outline_related_paper_num=outline_related_paper_num)
+            self._update_paper_pool(related_paper_ids, related_paper_titles, related_paper_content, related_paper_bibs, related_paper_imgs)
+            action.add_related_paper_ids(related_paper_ids)
 
     def generate_outline(self, topic, max_sections=10, initial_papers_num=20, retrieve_papers_num=20, min_papers=200, max_papers=300, outline_batch_size=10, max_query_num=5, outline_related_paper_num=2,max_related_papers=10, update_threshold=0.5):
         if isinstance(topic, dict):
@@ -527,6 +662,7 @@ class DynamicOutlineWriter:
             title="[bold green]AutoSurvey2.0[/bold green]",
             border_style="cyan"
         ))
+        print(f"\n[Generate outline Args] max_sections: {max_sections}, initial_papers_num: {initial_papers_num}, retrieve_papers_num: {retrieve_papers_num}, min_papers: {min_papers}, max_papers: {max_papers}, outline_batch_size: {outline_batch_size}, max_query_num: {max_query_num}, outline_related_paper_num: {outline_related_paper_num}, max_related_papers: {max_related_papers}, update_threshold: {update_threshold}")
         # 动态更新过程
         continue_query_flag = True
 
@@ -544,7 +680,8 @@ class DynamicOutlineWriter:
             task = progress.add_task("Generating...", total=max_papers, status=f"📚 Preparing...")
             # 0.0 初始化查询和outline状态
             current_query = ResearchQueryItem(target="NEW_SECTION_CANDIDATE", query=f"{topic_str}: {description}")
-            current_outline = "No outline generated yet, please generate from scratch in the first step."
+            current_outline = f"No outline exists yet. This is the initial construction phase. Based on the topic, research queries, and new papers, propose a comprehensive initial survey outline that can serve as a foundation for future iterations. The outline should include up to {max_sections} main sections and be well-structured, covering all standard components of an academic survey paper."
+
             query_pool = []
             self.query_history.append(current_query)
 
@@ -574,55 +711,87 @@ class DynamicOutlineWriter:
                 if unprocessed_count > 0:
                     progress.update(task, completed=inspected_count, status=f"🏷️ Generating {unprocessed_count} paper cards (Round {round_num}) | Papers: {inspected_count}/{len(self.paper_ids_pool)} | Action: {len(self.action_pool)}")
                     if self.debug:
-                        print(f"Generating paper cards for papers")
+                        print(f"Generating {unprocessed_count} paper cards for papers")
                     self._update_paper_cards(topic, max_related_papers=max_related_papers)
 
-                # 2. 为下一个 action 更新相关论文
-                if not self.action_pool[0].added_related_paper_ids:
-                    progress.update(task, completed=inspected_count, status=f"📝 Extracting related papers (Round {round_num}) | Papers: {inspected_count}/{len(self.paper_ids_pool)} | Action: {len(self.action_pool)}")
-                    self._add_related_paper_to_action(outline_related_paper_num=outline_related_paper_num)
+                # 2. 为所有 actions 更新相关论文（确保所有 action 都有相关论文）
+                # 如果 outline_related_paper_num 为 0，跳过相关论文提取，节省时间和 token
+                if outline_related_paper_num > 0 and len(self.action_pool) > 0:
+                    # 检查是否有 action 还没有添加相关论文
+                    needs_related_papers = any(not action.added_related_paper_ids for action in self.action_pool)
+                    
+                    if needs_related_papers:
+                        progress.update(task, completed=inspected_count, status=f"📝 Extracting related papers for all actions (Round {round_num}) | Papers: {inspected_count}/{len(self.paper_ids_pool)} | Actions: {len(self.action_pool)}")
+                        self._add_related_papers_to_all_actions(outline_related_paper_num=outline_related_paper_num)
 
-                    unprocessed_count = len([pid for pid in self.paper_ids_pool if pid not in self.paper_ids_to_cards.keys()])
-                    progress.update(task, completed=inspected_count, status=f"📝 Updating {unprocessed_count} extracted related paper cards (Round {round_num}) | Papers: {inspected_count}/{len(self.paper_ids_pool)} | Action: {len(self.action_pool)}")
-                    self._update_paper_cards(topic, max_related_papers=max_related_papers)
+                        unprocessed_count = len([pid for pid in self.paper_ids_pool if pid not in self.paper_ids_to_cards.keys()])
+                        if unprocessed_count > 0:
+                            progress.update(task, completed=inspected_count, status=f"📝 Updating {unprocessed_count} extracted related paper cards (Round {round_num}) | Papers: {inspected_count}/{len(self.paper_ids_pool)} | Actions: {len(self.action_pool)}")
+                            self._update_paper_cards(topic, max_related_papers=max_related_papers)
+                elif outline_related_paper_num == 0 and len(self.action_pool) > 0:
+                    # 标记所有 actions 为已处理，避免重复检查
+                    for action in self.action_pool:
+                        if not action.added_related_paper_ids:
+                            action.added_related_paper_ids = True
 
 
                 # 3. 更新 outline
-                # 3.0 获取下一个 action 中 batch size 个论文
-                current_query, current_paper_ids = self._get_next_action(outline_batch_size)
+                # 3.0 获取 action_pool 中所有的 queries 和 papers（一次性处理所有 actions）
+                current_queries, current_paper_ids = self._get_all_actions(max_papers_per_update=outline_batch_size)
+                
+                for retry_cnt in range(3):
+                    if retry_cnt == 1:
+                        print("Outline update is too aggressive, retrying...")
 
-                # # 1.1 从论文卡片中提取相关论文，并更新论文池和论文卡片
-                # all_related_paper_ids, all_related_paper_titles, all_related_paper_content, all_related_paper_bibs = self._extract_related_papers(current_paper_ids, outline_related_paper_num=outline_related_paper_num)
-                # current_paper_ids.extend(all_related_paper_ids)
-                # current_paper_ids = list(set(current_paper_ids))
-                # self._update_paper_pool(all_related_paper_ids, all_related_paper_titles, all_related_paper_content, all_related_paper_bibs)
-                # self._update_paper_cards(topic, max_related_papers=max_related_papers)
+                    if current_queries is None or current_paper_ids is None:
+                        if self.debug:
+                            print("No actions in pool, skipping outline update")
+                        continue
 
-                # 3.1 基于新发现的论文更新outline结构
-                progress.update(task, completed=inspected_count, status=f"📝 Updating outline (Round {round_num}) | Papers: {inspected_count}/{len(self.paper_ids_pool)} | Action: {len(self.action_pool)}")
-                self.inspected_papers.extend(current_paper_ids)
-                current_response = self._update_outline(topic, current_outline, current_query, current_paper_ids, max_sections=max_sections)
-
-                if current_response is None:
+                    # 3.1 基于新发现的论文更新outline结构
+                    progress.update(task, completed=inspected_count, status=f"📝 Updating outline (Round {round_num}) | Papers: {inspected_count}/{len(self.paper_ids_pool)} | Queries: {len(current_queries)}")
+                    self.inspected_papers.extend(current_paper_ids)
                     if self.debug:
-                        print("Failed to generate outline after 5 tries.")
-                    continue
+                        print(f"\nUpdating outline with {len(current_queries)} queries and {len(current_paper_ids)} papers")
+                        for i, q in enumerate(current_queries, 1):
+                            print(f"  Query {i}: {q.query} (Target: {q.target})")
+                    
+                    current_response = self._update_outline(topic, current_outline, current_queries, current_paper_ids, max_sections=max_sections)
 
-                current_response = Survey.from_outline_schema(current_response)
-                print(f"Change Log {len(self.history)}: {current_response.change_log}")
-                print(f"Outline {len(self.history)}: {current_response.to_outline_str()}")
+                    if current_response is None:
+                        if self.debug:
+                            print("Failed to generate outline after retries.")
+                        continue
 
-                if round_num > 0:
-                    similarity = calculate_outline_similarity(self.history[-1].to_outline_str(), current_response.to_outline_str())
-                    print(f"Similarity: {similarity}")
-                    if similarity < update_threshold:
-                        print("Outline update is too激进，拒绝更新")
-                        current_response = self.history[-1]
-                    else:
-                        print("Outline update is accepted")
+                    current_response = Survey.from_outline_schema(current_response)
+                    print(f"Change Log {len(self.history)}:\n{'\n'.join(current_response.change_log)}")
+                    print(f"Outline {len(self.history)}:\n{current_response.to_outline_str()}")
+                    
+                    # 打印所有处理的 queries
+                    print(f"Processed {len(current_queries)} queries in this round:")
+                    for i, q in enumerate(current_queries, 1):
+                        print(f"  Query {i}: {q.query} | Target: {q.target}")
+                    print()  # 空行分隔
+
+                    if round_num == 0:
+                        # 初始 outline 不做相似度检测
+                        if len(current_response.sections) < (max_sections // 2):
+                            print(f"{current_response}\n初始outline太短，重试")
+                        else:
+                            break
+                    if round_num > 0:
+                        similarity = calculate_outline_similarity(self.history[-1].to_outline_str(), current_response.to_outline_str())
+                        print(f"Similarity: {similarity}")
+                        if similarity < update_threshold:
+                            print("Outline update is too激进，拒绝更新")
+                            current_response = self.history[-1]
+                        else:
+                            print("Outline update is accepted")
+                            break
 
                 if round_num > 0:
                     current_response.change_log = self.history[-1].change_log + current_response.change_log
+
                 self.history.append(current_response)
                 current_outline = current_response.to_outline_str()
 
@@ -639,25 +808,24 @@ class DynamicOutlineWriter:
                 if len(self.action_pool) == 0 and len(self.inspected_papers) < max_papers:
                     progress.update(task, completed=inspected_count, status=f"🔎 Filtering & retrieving papers (Round {round_num}) | Papers: {inspected_count}/{len(self.paper_ids_pool)} | Action: {len(self.action_pool)}")
                     if len(query_pool) > max_query_num:
-                        generated_queries = self._filter_query(topic, query_pool, current_outline, max_query_num=max_query_num)
-                        if generated_queries is None:
-                            generated_queries = random.sample(query_pool, max_query_num)
+                        # generated_queries = self._filter_query(topic, query_pool, current_outline, max_query_num=max_query_num)
+                        # if generated_queries is None:
+                        generated_queries = random.sample(query_pool, max_query_num)
                     else:
                         generated_queries = query_pool
                     if self.debug:
                         print(f"Generated queries: {generated_queries}")
 
-                    # 5.1 执行查询并更新论文池
-                    for query in generated_queries:
-                        self.query_history.append(query)
+                    # 5.1 并行执行查询并更新论文池
+                    retrieve_results = self._retrieve_queries(generated_queries, retrieve_papers_num=retrieve_papers_num)
 
-                        progress.update(task, completed=inspected_count, status=f"🔍 Retrieving papers (Round {round_num}) | Papers: {inspected_count}/{len(self.paper_ids_pool)} | Action: {len(self.action_pool)}")
-                        query_paper_ids, query_paper_titles, query_paper_content, query_paper_bibs, query_paper_imgs = self._retrieve_papers(
-                            query,
-                            num=retrieve_papers_num
-                        )
+                    # 处理检索结果，更新共享数据结构
+                    for query, query_paper_ids, query_paper_titles, query_paper_content, query_paper_bibs, query_paper_imgs in retrieve_results:
+                        progress.update(task, completed=inspected_count, status=f"🔍 Retrieved papers for query (Round {round_num}) | Papers: {inspected_count}/{len(self.paper_ids_pool)} | Action: {len(self.action_pool)}")
+                        self.query_history.append(query)
                         self._update_paper_pool(query_paper_ids, query_paper_titles, query_paper_content, query_paper_bibs, query_paper_imgs)
                         self.action_pool.append(Action(query, query_paper_ids))
+                    
                     query_pool = []
 
                     # 6. 决定是否继续检索更多论文
@@ -680,25 +848,42 @@ class DynamicOutlineWriter:
 
             # 7. 优化和完善最终outline
             # 7.1 对outline进行最终精化，确保结构合理
-            refined_outline = self._refine_outline(topic, self.history[-1], max_sections=max_sections)
-            if refined_outline is not None:
+            print("\n\nRefining final outline...")
+            max_attempts = 3
+            attempt = 0
+            refined_outline = None
+
+            while attempt < max_attempts:
+                attempt += 1
+                print(f"\nAttempt {attempt} to refine outline:")
+                refined_outline = self._refine_outline(topic, self.history[-1], max_sections=max_sections)
+
+                if refined_outline is None:
+                    refined_outline = self.history[-1]
+                    print(f"Attempt {attempt}: refine_outline returned None, using previous outline")
+                    continue
+
                 print(f"Change Log {len(self.history)}: {refined_outline.change_log}")
                 refined_outline = Survey.from_outline_schema(refined_outline)
                 similarity = calculate_outline_similarity(self.history[-1].to_outline_str(), refined_outline.to_outline_str())
                 print(f"Outline {len(self.history)}: {refined_outline.to_outline_str()}")
                 print(f"Similarity: {similarity}")
-                # if similarity < update_threshold:
-                #     print("Outline update is too激进，拒绝更新")
-                #     refined_outline = self.history[-1]
-                # else:
-                #     print("Outline update is accepted")
+                if similarity < 0.5:
+                    print(f"Attempt {attempt}: Outline update is too 激进，拒绝更新")
+                    refined_outline = None
+                else:
+                    print(f"Attempt {attempt}: Outline update is accepted")
+                    refined_outline.paper_ids_to_cards = self.paper_ids_to_cards
+                    refined_outline.change_log = self.history[-1].change_log + refined_outline.change_log
+                    self.history.append(refined_outline)
+                    break
 
-                refined_outline.paper_ids_to_cards = self.paper_ids_to_cards
-                refined_outline.change_log = self.history[-1].change_log + refined_outline.change_log
-                self.history.append(refined_outline)
-            else:
+            # 如果三次都失败，就保留旧的 outline
+            if refined_outline is None:
+                print("三次尝试都未通过，保留原始 outline")
                 refined_outline = self.history[-1]
-            print(f"Outline {len(self.history)}: {refined_outline.to_outline_str()}")
+            
+            print(f"\n\nOutline {len(self.history)}: {refined_outline.to_outline_str()}")
 
             # 7.2 将论文映射到对应的章节和子章节
             progress.update(task, completed=min(final_inspected, max_papers), status=f"🔧 Mapping papers to outline... | Papers: {final_inspected}/{len(self.paper_ids_pool)} | Action: {len(self.action_pool)}")
@@ -781,22 +966,21 @@ class DynamicOutlineWriter:
 if __name__ == "__main__":
 
     db = database(converter_workers=2)
-    # Configure your model and API settings via environment variables or config file
-    model = os.environ.get("MODEL", "gpt-4o-mini")
-    api_key = os.environ.get("API_KEY", None)
-    api_url = os.environ.get("API_URL", None)
+    model = "gpt-4o-mini"
+    api_key = ""
+    api_url = ""
 
     topic = "LLM-based Multi-Agent"
-    outline_writer = DynamicOutlineWriter(model=model, api_key=api_key, use_abs=False, api_url=api_url, database=db, debug=False)
+    outline_writer = DynamicOutlineWriter(model=model, api_key=api_key, use_abs=False, api_url=api_url, database=db, debug=True)
 
     #%%
-    # history = outline_writer.generate_outline(topic, max_sections=10, initial_papers_num=20, retrieve_papers_num=10, min_papers=200, max_papers=300, outline_related_paper_num=1, outline_batch_size=20, max_query_num=3)
-    history = outline_writer.generate_outline(topic, max_sections=10, initial_papers_num=2, retrieve_papers_num=2, max_papers=10, outline_batch_size=10, max_query_num=2)
+    history = outline_writer.generate_outline(topic, max_sections=10, initial_papers_num=20, retrieve_papers_num=20, min_papers=800, max_papers=1200, outline_related_paper_num=3, outline_batch_size=50, max_query_num=3, update_threshold=0.5)
+    # history = outline_writer.generate_outline(topic, max_sections=10, initial_papers_num=2, retrieve_papers_num=2, max_papers=10, outline_batch_size=10, max_query_num=2)
 
     # outline_writer.save_state("LLM_Multiagent_outline_gpt-4o-mini_full_content.pkl")
 
     # outline_writer = DynamicOutlineWriter.load_state("LLM_Multiagent_outline_glm4p_full_content-0626.pkl", db)
-    outline_writer.save_state("LLM_Multiagent_outline_glm4p_full_content-0629-2.pkl")
+    # outline_writer.save_state("LLM_Multiagent_outline_glm4p_full_content-0629-2.pkl")
 # outline_writer = DynamicOutlineWriter.load_state("LLM_Multiagent_outline_glm4p_full_content.pkl", db)
 
 

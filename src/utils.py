@@ -34,7 +34,7 @@ class tokenCounter():
         MODEL_PRICES = json.load(fin)
 
     def __init__(self) -> None:
-        self.encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+        self.encoding = tiktoken.encoding_for_model("gpt-4o-mini")
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.total_cost = 0.0

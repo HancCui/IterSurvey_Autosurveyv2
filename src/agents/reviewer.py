@@ -21,6 +21,7 @@ from src.utils import collate_text_with_imgs
 from src.agents.utils import Section, Subsection
 
 from src.agents.outline_writer import *
+from src.cost_tracker import track_time, Timer
 
 class Reviewer():
 
@@ -38,7 +39,7 @@ class Reviewer():
         self.input_token_usage, self.output_token_usage = 0, 0
 
 
-    def get_reviewer_usage(self):
+    def get_token_usage(self):
         current_usage = self.api_model.token_counter.get_total_usage()
         return current_usage
 
@@ -68,43 +69,72 @@ class Reviewer():
         title = section.title
         section_text = section.content
 
-        # re_reference = re.compile(r'\[(.*?)\]')
-        # matches = re_reference.findall(section_text)
-
-        # all_reference_arxivID = set()
-        # for match in matches:
-        #     id_list = match.split(";")
-        #     for id in id_list:
-        #         all_reference_arxivID.add(id.strip())
-
-        # useful_paper_cards = {}
-        # for reference_arxivID in list(all_reference_arxivID):
-            # cur_paper_card = ""
-            # try:
-            #     reference_arxivID = reference_arxivID.split('v')[0] if 'v' in reference_arxivID else reference_arxivID
-            #     cur_paper_card = self.paper_ids_to_cards[reference_arxivID.strip()]
-            #     useful_paper_cards[reference_arxivID.strip()] = cur_paper_card
-            # except:
-            #     print(f"Can't find id {reference_arxivID}")
-        card_list = []
-        for paper_id in section.paper_ids:
-            card_list.append(self.paper_ids_to_cards.get(paper_id.strip(), None))
-
-        paper_cards_str = ""
-        for i, card in enumerate(card_list):
-            paper_cards_str += f"Paper index: [{i+1}]\n"
-            if card is not None:
-                paper_cards_str += card.to_str() + "\n"
-            else:
-                paper_cards_str += "Paper not found.\n"
-            paper_cards_str += "---------\n"
-
+        # 先构建 sub_section_content，因为需要从中提取引用
         sub_section_content = ""
         if isinstance(section, Section):
             for sub_section in section.subsections:
                 sub_section_content += f"### {sub_section.title}\n{sub_section.content}\n"
         else:
             sub_section_content = "No subsection in this section."
+
+        # 从 section_text 和 sub_section_content 中提取所有实际引用的数字索引
+        digit_cite_pattern = re.compile(r'\[(\d+(?:\s*,\s*\d+)*)\]')
+        all_content = section_text + "\n" + sub_section_content
+        matches = digit_cite_pattern.findall(all_content)
+        
+        # 收集所有引用的索引（保持顺序，不去重，因为需要显示每个引用的索引）
+        cited_indices_list = []
+        for match in matches:
+            # 处理 [1,2,3] 这样的格式
+            indices = [int(idx.strip()) for idx in match.split(',')]
+            cited_indices_list.extend(indices)
+        
+        # 去重但保持顺序，用于统计
+        cited_indices_set = set(cited_indices_list)
+        
+        # 根据引用的索引从 section.paper_ids 中筛选出实际引用的 paper_ids
+        # 注意：索引从1开始，但列表从0开始
+        # 保存 (paper_id, original_idx) 的列表，按索引顺序排列
+        cited_papers_with_indices = []
+        for idx in sorted(cited_indices_set):
+            if 1 <= idx <= len(section.paper_ids):
+                paper_id = section.paper_ids[idx - 1]
+                cited_papers_with_indices.append((paper_id, idx))
+            else:
+                print(f"Warning: Citation index {idx} out of range for section '{title}' (has {len(section.paper_ids)} papers)")
+        
+        # 去重：如果同一个 paper_id 出现多次，只保留索引最小的那个
+        seen_paper_ids = set()
+        unique_cited_papers = []
+        for paper_id, idx in cited_papers_with_indices:
+            if paper_id not in seen_paper_ids:
+                seen_paper_ids.add(paper_id)
+                unique_cited_papers.append((paper_id, idx))
+        
+        print(f"Section '{title}': Found {len(cited_indices_set)} unique citation indices, using {len(unique_cited_papers)} unique paper cards (out of {len(section.paper_ids)} total)")
+        
+        # 只获取实际引用的 paper cards，并保存对应的原始索引
+        card_list = []
+        original_indices = []
+        for paper_id, original_idx in unique_cited_papers:
+            card_list.append(self.paper_ids_to_cards.get(paper_id.strip(), None))
+            original_indices.append(original_idx)
+
+        # if len(card_list) > 0:
+        #     print(f"Paper card 0, token length: {self.token_counter.num_tokens_from_string(card_list[0].to_str())}: \n{card_list[0].to_str()}\n")
+            
+        paper_cards_str = ""
+        for i, (card, original_idx) in enumerate(zip(card_list, original_indices)):
+            paper_cards_str += f"Paper index: [{original_idx}]\n"
+            if card is not None:
+                if type(card) == str:
+                    card_str = card
+                else:
+                    card_str = card.to_str()
+                paper_cards_str += card_str + "\n"
+            else:
+                paper_cards_str += "Paper not found.\n"
+            paper_cards_str += "---------\n"
 
         review_single_section_prompt = self.__generate_prompt(
             SINGLE_SECTION_REVIEW_PROMPT,
@@ -118,15 +148,20 @@ class Reviewer():
         )
         # 如果超长，每次移除一个paper card，直到长度符合要求
         # useful_paper_cards_list = list(useful_paper_cards.items())
-        while self.token_counter.num_tokens_from_string(review_single_section_prompt) > self.max_len and len(useful_paper_cards_list) > 0:
-            # 移除最后一个paper card
-            # useful_paper_cards_list = useful_paper_cards_list[:-1]
+        while self.token_counter.num_tokens_from_string(review_single_section_prompt) > self.max_len and len(card_list) > 0:
+            print(f"Review prompt too long ({self.token_counter.num_tokens_from_string(review_single_section_prompt)} tokens). Removing one paper card.")
+            # 移除最后一个paper card 和对应的原始索引
             card_list = card_list[:-1]
+            original_indices = original_indices[:-1]
             paper_cards_str = ""
-            for i, card in enumerate(card_list):
-                paper_cards_str += f"Paper index: [{i+1}]\n"
+            for i, (card, original_idx) in enumerate(zip(card_list, original_indices)):
+                paper_cards_str += f"Paper index: [{original_idx}]\n"
                 if card is not None:
-                    paper_cards_str += card.to_str() + "\n"
+                    if type(card) == str:
+                        card_str = card
+                    else:
+                        card_str = card.to_str()
+                    paper_cards_str += card_str + "\n"
                 else:
                     paper_cards_str += "Paper not found.\n"
                 paper_cards_str += "---------\n"
@@ -142,10 +177,12 @@ class Reviewer():
                 }
             )
 
-
+        print(f"Review paper cards str token length: {self.token_counter.num_tokens_from_string(paper_cards_str)}")
+        print(f"Review single section prompt token length: {self.token_counter.num_tokens_from_string(review_single_section_prompt)}")
         response = self.api_model.chat(review_single_section_prompt)
         single_section_review_comment = self.clean_response(response)
         return single_section_review_comment
+
 
     def review_single_section(self, section, overall_survey_content):
         """这里主要要处理的一个问题是，如何处理带有层次结构的 section（也就是对 sub_section 的 review），以及对于结果的结构化处理
@@ -182,6 +219,9 @@ class Refiner():
         #     self.paper_ids_to_cards[id.strip()] = card
         self.input_token_usage, self.output_token_usage = 0, 0
 
+    def get_token_usage(self):
+        return self.api_model.token_counter.get_total_usage()
+
     def __generate_prompt(self, template, paras):
         """
         Generate a prompt by replacing placeholders in the template with actual values from paras.
@@ -202,16 +242,66 @@ class Refiner():
         title = section.title
         section_text = section.content
 
+        # 先构建 sub_section_content，因为需要从中提取引用
+        sub_section_content = ""
+        if isinstance(section, Section):
+            for sub_section in section.subsections:
+                sub_section_content += f"### {sub_section.title}\n{sub_section.content}\n"
+        else:
+            sub_section_content = "No subsection in this section."
 
+        # 从 section_text 和 sub_section_content 中提取所有实际引用的数字索引
+        digit_cite_pattern = re.compile(r'\[(\d+(?:\s*,\s*\d+)*)\]')
+        all_content = section_text + "\n" + sub_section_content
+        matches = digit_cite_pattern.findall(all_content)
+        
+        # 收集所有引用的索引（保持顺序，不去重，因为需要显示每个引用的索引）
+        cited_indices_list = []
+        for match in matches:
+            # 处理 [1,2,3] 这样的格式
+            indices = [int(idx.strip()) for idx in match.split(',')]
+            cited_indices_list.extend(indices)
+        
+        # 去重但保持顺序，用于统计
+        cited_indices_set = set(cited_indices_list)
+        
+        # 根据引用的索引从 section.paper_ids 中筛选出实际引用的 paper_ids
+        # 注意：索引从1开始，但列表从0开始
+        # 保存 (paper_id, original_idx) 的列表，按索引顺序排列
+        cited_papers_with_indices = []
+        for idx in sorted(cited_indices_set):
+            if 1 <= idx <= len(section.paper_ids):
+                paper_id = section.paper_ids[idx - 1]
+                cited_papers_with_indices.append((paper_id, idx))
+            else:
+                print(f"Warning: Citation index {idx} out of range for section '{title}' (has {len(section.paper_ids)} papers)")
+        
+        # 去重：如果同一个 paper_id 出现多次，只保留索引最小的那个
+        seen_paper_ids = set()
+        unique_cited_papers = []
+        for paper_id, idx in cited_papers_with_indices:
+            if paper_id not in seen_paper_ids:
+                seen_paper_ids.add(paper_id)
+                unique_cited_papers.append((paper_id, idx))
+        
+        print(f"Section '{title}': Found {len(cited_indices_set)} unique citation indices, using {len(unique_cited_papers)} unique paper cards (out of {len(section.paper_ids)} total)")
+        
+        # 只获取实际引用的 paper cards，并保存对应的原始索引
         card_list = []
-        for paper_id in section.paper_ids:
+        original_indices = []
+        for paper_id, original_idx in unique_cited_papers:
             card_list.append(self.paper_ids_to_cards.get(paper_id.strip(), None))
+            original_indices.append(original_idx)
 
         paper_cards_str = ""
-        for i, card in enumerate(card_list):
-            paper_cards_str += f"Paper index: [{i+1}]\n"
+        for i, (card, original_idx) in enumerate(zip(card_list, original_indices)):
+            paper_cards_str += f"Paper index: [{original_idx}]\n"
             if card is not None:
-                paper_cards_str += card.to_str() + "\n"
+                if type(card) == str:
+                    card_str = card
+                else:
+                    card_str = card.to_str()
+                paper_cards_str += card_str + "\n"
             else:
                 paper_cards_str += "Paper not found.\n"
             paper_cards_str += "---------\n"
@@ -219,16 +309,21 @@ class Refiner():
 
         refine_single_section_prompt = self.__generate_prompt(SINGLE_SECTION_REFINE_PROMPT_STRUCTURED, {"refine_section_title": title, "refine_section_text": section_text, "paper_cards_single_line": paper_cards_str, "review_feedback": review_feedback})
         # useful_paper_cards_list = list(useful_paper_cards.items())
-        while self.token_counter.num_tokens_from_string(refine_single_section_prompt) > self.max_len:
-            # 移除最后一个paper card
-            # useful_paper_cards_list = useful_paper_cards_list[:-1]
+        while self.token_counter.num_tokens_from_string(refine_single_section_prompt) > self.max_len and len(card_list) > 0:
+            print(f"Refine prompt too long ({self.token_counter.num_tokens_from_string(refine_single_section_prompt)} tokens). Removing one paper card.")
+            # 移除最后一个paper card 和对应的原始索引
             card_list = card_list[:-1]
+            original_indices = original_indices[:-1]
             # 重新拼接paper_cards_str
             paper_cards_str = ""
-            for i, card in enumerate(card_list):
-                paper_cards_str += f"Paper index: [{i+1}]\n"
+            for i, (card, original_idx) in enumerate(zip(card_list, original_indices)):
+                paper_cards_str += f"Paper index: [{original_idx}]\n"
                 if card is not None:
-                    paper_cards_str += card.to_str() + "\n"
+                    if type(card) == str:
+                        card_str = card
+                    else:
+                        card_str = card.to_str()
+                    paper_cards_str += card_str + "\n"
                 else:
                     paper_cards_str += "Paper not found.\n"
                 paper_cards_str += "---------\n"
@@ -243,8 +338,10 @@ class Refiner():
                 }
             )
 
-        for _ in range(max_retries):
-            response = self.api_model.chat(refine_single_section_prompt, check_cache=True)
+        for i in range(max_retries):
+            print(f"Refine retry{i} paper cards str token length: {self.token_counter.num_tokens_from_string(paper_cards_str)}")
+            print(f"Refine retry{i} single section prompt token length: {self.token_counter.num_tokens_from_string(refine_single_section_prompt)}")
+            response = self.api_model.chat(refine_single_section_prompt, check_cache=False)
             if response:
                 # Then we check the citation
                 check_citation_prompt_paras = {
@@ -252,7 +349,7 @@ class Refiner():
                         "subsection_content": response
                     }
                 check_citation_prompt = self.__generate_prompt(CHECK_CITATION_PROMPT, check_citation_prompt_paras)
-                response = self.api_model.chat(check_citation_prompt, check_cache=True)
+                response = self.api_model.chat(check_citation_prompt, check_cache=False)
                 # Simple check for subsection markers
                 if '### ' in response or '## ' in response:
                     print(f"WARNING: Refined content contains subsection markers, regenerating...")
@@ -323,7 +420,7 @@ class Refiner():
             )
 
         for _ in range(max_retries):
-            response = self.api_model.chat_structured(refine_single_section_prompt, SINGLE_SECTION_REFINE_schema, check_cache=True)
+            response = self.api_model.chat_structured(refine_single_section_prompt, SINGLE_SECTION_REFINE_schema, check_cache=False)
             if response:
                 # Simple check for subsection markers
                 if '### ' in response.content or '## ' in response.content:
@@ -405,7 +502,7 @@ def review_sections(model, raw_survey, db, api_key, api_url, max_len):
 
     # # ------
     # 多进程实现
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=64) as executor:
         futures = {executor.submit(process_single_review, task): task for task in review_tasks}
 
         for future in tqdm(as_completed(futures), total=len(review_tasks), desc="Reviewing sections"):
@@ -442,7 +539,7 @@ def refine_sections(model, section_review_content_list, raw_survey, db, api_key,
     # # ------
     # 多进程实现
     section_refined_content_list = [[] for _ in range(len(refine_tasks))]
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=64) as executor:
         futures = {executor.submit(process_single_refine, task): task for task in refine_tasks}
 
         for future in tqdm(as_completed(futures), total=len(refine_tasks), desc="Refining sections"):
@@ -478,7 +575,6 @@ def parse_args():
     return args
 
 
-
 # %%
 if __name__ == "__main__":
     import pickle
@@ -487,8 +583,7 @@ if __name__ == "__main__":
 
     api_key = args.api_key
 
-    # NOTE: Update path to your actual data file
-    section_content_list_pickle_path = os.environ.get("RAW_SURVEY_PATH", "./output/tmp/_raw_survey_w_sections.pkl")
+    section_content_list_pickle_path = "./output/tmp/_raw_survey_w_sections.pkl"
 
     db = database(converter_workers=2)
 

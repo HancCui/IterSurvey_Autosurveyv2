@@ -21,48 +21,56 @@ Description: {description}
 </existing_outline>
 
 <instruction>
+You are provided with:
+1. A research topic for context
+2. Research queries and their target scopes
+3. New paper cards retrieved from the research queries
+4. existing outline
+
+Each query is given as “Query X: … | Target: …”. Apply updates only to the Target node, or create a new section/subsection if marked NEW_SECTION_CANDIDATE or NEW_SUBSECTION_CANDIDATE.
+
 Your task is divided into three steps:
 
 **Step 1: Analyze**
 - Read each paper summary carefully.
 - Extract only directly relevant contributions and insights; ignore off-topic or tangential content.
-- Map every extracted finding to the active <research_query> Query Target. If a finding does not align, do not use it.
-- Also analyze the current outline structure for balance: check subsection counts, distribution across sections, dominance (>40% of total subsections in one section), oversize subsections (>6 bullets), or underdeveloped sections (<2 subsections).
+- Map findings only to their declared Query Target; ignore off-target content.
+- Check the outline’s balance (avoid dominant, underdeveloped, or oversized sections/subsections).
 
 **Step 2: Update the Outline**
 Update the survey outline based on your analysis:
-- **Target Alignment**: All updates must be traceably linked to the <research_query> Query Target. If the new papers do not align with this target, keep the outline unchanged and state this explicitly in the changelog.
+- **Target-Guided Updates**: For each query, prioritize applying updates inside its declared Target node. Allowed operations include expanding the Target, adding a new subsection within a closely related section, or creating a new top-level section when Target is NEW_SECTION_CANDIDATE / NEW_SUBSECTION_CANDIDATE. Any modification outside the Target must be minimal, necessary for coherence, and explicitly justified in the changelog. If the new papers are off-target, make no changes and record the reason.
 - **Stability First (Highest priority)**:
   * Always output the **entire outline** (full structure).
   * Preserve all existing sections/subsections **unless** you explicitly merge them.
   * Never drop or shorten a node silently. Any reduction must be a **merge/fuse** with justification in the changelog.
   * Prefer **additive, incremental** edits; avoid renaming/re-shuffling unless needed for clarity/balance.
-- **Balance & Diversity Enforcement (Highest Priority)**:
-  * Ensure no single section dominates the outline.
-  * Each section must have **3–6 subsections**; avoid extremes.
-  * If one section has >40% of total subsections, redistribute or split it into parallel sections.
-  * If a section has **>6 subsections**, split it into multiple coherent sections or promote one/more subsections into new top-level sections.
-  * Prefer **lateral growth** (new sections/subsections at the same level) over just deepening one branch.
-  * Keep overall number of main sections ≤ {max_sections}.
-- **Action Selection Principle (soft, non-mechanical)**
-  * **Add (new section/subsection)** when the new papers reveal a clearly new, self-contained direction, method family, evaluation regime, or system dimension that is **not represented** and cannot be coherently integrated into an existing node without blurring its scope. Justify its independence.
-  * **Expand (refine descriptions)** when findings **deepen or broaden** an existing node: add empirical patterns, method categories, trade-offs, typical failure modes, evaluation metrics, dataset regimes, or implementation considerations. Prefer expansion over new nodes if the contribution is incremental rather than foundational.
-  * **Fuse (merge)** when two nodes substantially **overlap in scope** or one is a **narrow subset** of the other. Merge into a unified node with a clear title; **deduplicate** and rewrite the description for coherence. Record the justification.
-  * **Informative Descriptions (always-on)**: every subsection description must have **≥3 numbered bullets**, each **knowledge-dense** (concrete insight, method class, challenge, trend, or empirical pattern), using **domain-specific terminology** and, where appropriate, **comparative/analytical** aspects (trade-offs, strengths vs weaknesses, performance regimes). Avoid vague phrasing.
-  * **No Change** when the new papers are off-target, redundant, or add no material depth or structure. Explicitly record a concise “No change (reason: …)”.
-- **Content Expansion Rules**
   * Add new nodes only when justified (e.g., NEW_SECTION_CANDIDATE / NEW_SUBSECTION_CANDIDATE).
   * When expanding, favor **breadth (new siblings)** before depth in a single branch.
-  * If a subsection’s description balloons (>6 bullets), consider **splitting** into multiple coherent subsections.
+- **Balance & Diversity Enforcement (Highest Priority)**:
+  * No single section >40% of total subsections.
+  * Each section: 3–6 subsections; each subsection: 3–6 bullets.
+  * Split or merge sections to maintain structural balance.
+  * Sections with one subsection are underdeveloped—merge upward.
+  * Keep ≤ {max_sections} top-level sections.
+  * Prefer **lateral growth** (new sections/subsections at the same level) over just deepening one branch.
+- **Action Selection Principle (soft, non-mechanical)**
+  * **Add:** Introduce a new section/subsection when papers reveal a clearly new, self-contained direction, method family, evaluation regime, or system dimension not represented. Justify independence.  
+  * **Expand:** Refine an existing node when findings deepen or broaden it (e.g., empirical patterns, method categories, trade-offs, typical failure modes, metrics, datasets, implementation details). Prefer expansion if contribution is incremental.  
+  * **Fuse:** Merge nodes that substantially overlap or when one is a narrow subset of another. Integrate descriptions, remove redundancy, and record rationale in the changelog.  
+  * **No Change:** If papers are off-target, redundant, or add no material depth, leave the node unchanged and record reason.  
+- **Descriptions:**
+  * Each section/subsection must include a description.
+  * A high-level summary paragraph that synthesizes the node’s scope, purpose, and key ideas.
+  * **3–6 detailed bullets**, each a full, informative, domain-specific sentence covering methods, insights, trends, trade-offs, challenges, or empirical patterns. Prefer including comparative/analytical aspects where relevant (e.g., strengths vs weaknesses, performance regimes).  
+  * Ensure descriptions are knowledge-dense, comprehensive, and rich enough to directly support later paper retrieval and survey writing, not just a list of keywords.
 - **Fusion (Merging) Details**
   * When merging, keep the most representative title or create a unified one.
   * Integrate and streamline both descriptions; remove redundancy.
   * Note the merge explicitly in the changelog with rationale.
 - **Logical Flow**: Organize general → specific, fundamentals → advanced; ensure smooth progression and consistent granularity.
 - **Cross-link Awareness**: If a point relates to multiple areas, place it in the best-fit location and add cross-references (e.g., “See also: <Section/Subsection>”).
-- **Survey Norm Awareness**: Typical survey dimensions include:
-  * Background/Related Work, Architectures/Methodologies, System Design & Agents, Applications, Evaluation/Benchmarks & Datasets, Tooling/Platforms, Open Challenges.
-  * Keep coverage **balanced** across these and avoid redundancy.
+- **Survey Norms:** Typical survey sections: Introduction, Background/Related Work, Research Sections, Open Challenges/Future Directions, Conclusion. Introduction first, Conclusion last. Maintain balance across sections and avoid redundancy. Ignore Acknowledgment/References/Appendix (handled separately).
 
 **Step 3: Record Changes**
 - Provide a clear changelog of what was added, expanded, merged, renamed, or left unchanged, with references to the Query Target.
@@ -86,39 +94,39 @@ Update the survey outline based on your analysis:
   ],
   "outline": [
     {{
-      "name": "Section Name 1",
-      "description": "Numbered bullets (1., 2., 3., ...) each carrying concrete, domain-specific insights; 3–6 bullets recommended.",
+      "name": "Name of Section 1",
+      "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet should be a detailed, knowledge-dense sentence covering a specific aspect of the section.",
       "subsections": [
         {{
-          "name": "Subsection Name 1.1",
-          "description": "At least 3 numbered bullets; concise, domain-specific, with comparative/analytical elements; include cross-links when relevant."
+          "name": "Name of Subsection 1.1",
+          "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet must be a full, informative sentence with domain-specific details."
         }},
         {{
-          "name": "Subsection Name 1.2",
-          "description": "At least 3 numbered bullets; concise, domain-specific, with comparative/analytical elements; include cross-links when relevant."
+          "name": "Name of Subsection 1.2",
+          "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet must be a full, informative sentence with domain-specific details."
         }},
         {{
-          "name": "Subsection Name 1.3",
-          "description": "At least 3 numbered bullets; concise, domain-specific, with comparative/analytical elements; include cross-links when relevant."
+          "name": "Name of Subsection 1.3",
+          "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet must be a full, informative sentence with domain-specific details."
         }},
         ...
       ]
     }},
     {{
-      "name": "Section Name 2",
-      "description": "Numbered bullets (1., 2., 3., ...) each carrying concrete, domain-specific insights; 3–6 bullets recommended.",
+      "name": "Name of Section 2",
+      "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet should be a detailed, knowledge-dense sentence covering a specific aspect of the section.",
       "subsections": [
         {{
-          "name": "Subsection Name 2.1",
-          "description": "At least 3 numbered bullets; concise, domain-specific, with comparative/analytical elements; include cross-links when relevant."
+          "name": "Name of Subsection 2.1",
+          "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet must be a full, informative sentence with domain-specific details."
         }},
         {{
-          "name": "Subsection Name 2.2",
-          "description": "At least 3 numbered bullets; concise, domain-specific, with comparative/analytical elements; include cross-links when relevant."
+          "name": "Name of Subsection 2.2",
+          "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet must be a full, informative sentence with domain-specific details."
         }},
         {{
-          "name": "Subsection Name 2.3",
-          "description": "At least 3 numbered bullets; concise, domain-specific, with comparative/analytical elements; include cross-links when relevant."
+          "name": "Name of Subsection 2.3",
+          "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet must be a full, informative sentence with domain-specific details."
         }},
         ...
       ]
@@ -129,6 +137,96 @@ Update the survey outline based on your analysis:
 </output_format>
 
 Now carefully refine the outline to produce a well-structured, comprehensive, and incrementally updated survey framework.
+"""
+
+REFINE_OUTLINE_PROMPT = """You are an expert research assistant for academic surveys. You have completed the comprehensive literature exploration and iterative outline construction process. Now, you need to transform the research outline into a publication-ready survey paper structure. Your task is to refine and restructure the outline to meet academic publication standards, ensuring it contains all essential survey paper components and maintains optimal structural organization for effective paper writing.
+
+<topic>
+Topic: {topic}
+Description: {description}
+</topic>
+
+<current_outline>
+{current_outline}
+</current_outline>
+
+<instruction>
+You are provided with:
+1. A research topic for the survey
+2. A current outline of the survey that has been iteratively developed through comprehensive literature exploration
+
+Your task is to refine the research outline into a publication-ready survey paper structure. The current outline represents the comprehensive research findings, and your refinements should focus on structural optimization without introducing significant changes or fabrications. Follow these principles:
+
+**Step 1: Structural Optimization**
+1. Ensure smooth logical transitions between sections for natural flow.
+2. Avoid sections with only one subsection. Merge the subsection's content and title directly into the parent section.
+3. Add essential survey components (e.g., Introduction, Background/Related Work, Open Challenges/Future Directions, Conclusion) if missing, ensuring the outline adheres to standard survey structures.
+4. Do not include non-content sections such as Acknowledgment, References, or Appendix; these are handled separately in post-processing.
+
+**Step 2: Preserve Original Integrity**
+- Do not make significant changes to the original outline. The outline is the result of multiple iterations and reflects thorough research. Avoid introducing content based on the model's own knowledge.
+- Focus on refining and optimizing the existing structure rather than overhauling it.
+
+**Step 3: Record Changes**
+- Provide a clear changelog of what was merged, split, reorganized, or added (e.g., "Moved subsection X under section Y", "Added 'Future Directions' section", "Merged A and B into C").
+- If no changes were needed, explicitly state "No structural changes required."
+
+</instruction>
+
+<output_format>
+{{
+  "thinking": "Analysis of the current outline and justification for structural refinements",
+  "change_log": [
+    "Added Introduction section",
+    "Merged 'xxx' and 'xxx' into one subsection",
+    "Reorganized 'xxx' into three thematic clusters",
+    ...
+  ],
+  "outline": [
+    {{
+      "name": "Name of Section 1",
+      "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet should be a detailed, knowledge-dense sentence covering a specific aspect of the section.",
+      "subsections": [
+        {{
+          "name": "Name of Subsection 1.1",
+          "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet must be a full, informative sentence with domain-specific details."
+        }},
+        {{
+          "name": "Name of Subsection 1.2",
+          "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet must be a full, informative sentence with domain-specific details."
+        }},
+        {{
+          "name": "Name of Subsection 1.3",
+          "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet must be a full, informative sentence with domain-specific details."
+        }},
+        ...
+      ]
+    }},
+    {{
+      "name": "Name of Section 2",
+      "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet should be a detailed, knowledge-dense sentence covering a specific aspect of the section.",
+      "subsections": [
+        {{
+          "name": "Name of Subsection 2.1",
+          "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet must be a full, informative sentence with domain-specific details."
+        }},
+        {{
+          "name": "Name of Subsection 2.2",
+          "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet must be a full, informative sentence with domain-specific details."
+        }},
+        {{
+          "name": "Name of Subsection 2.3",
+          "description": "An introductory paragraph that synthesizes this part. Then 3-6 numbered bullets (1., 2., 3., ...) elaborates on a key aspect, sub-domain, or finding. Each bullet must be a full, informative sentence with domain-specific details."
+        }},
+        ...
+      ]
+    }},
+    ...
+  ]
+}}
+</output_format>
+
+Now carefully refine the outline to create a well-structured, publication-ready survey framework.
 """
 
 PAPER_CARD_PROMPT = """You are an expert research assistant specializing in academic paper analysis and synthesis. Your task is to read and analyze a research paper related to the topic, then generate a structured abstract card for the paper to facilitate high-level survey construction.
@@ -451,114 +549,6 @@ Evaluate whether to continue literature retrieval based on:
 </output_format>
 
 Now, thinking carefully and make your decision on whether to continue literature retrieval."""
-
-REFINE_OUTLINE_PROMPT = """You are an expert research assistant for academic surveys. You have completed the comprehensive literature exploration and iterative outline construction process. Now, you need to transform the research outline into a publication-ready survey paper structure. Your task is to refine and restructure the outline to meet academic publication standards, ensuring it contains all essential survey paper components and maintains optimal structural organization for effective paper writing.
-
-<topic>
-Topic: {topic}
-Description: {description}
-</topic>
-
-<current_outline>
-{current_outline}
-</current_outline>
-
-<instruction>
-You are provided with:
-1. A research topic for the survey
-2. A current outline of the survey that has been iteratively developed through comprehensive literature exploration
-
-Your task is to transform the research outline into a publication-ready survey paper structure that meets academic publication standards. The current outline represents the comprehensive research findings, but it needs structural refinement to become an effective framework for survey paper writing.
-
-**Step 1: Analyze Current Outline**
-- Carefully analyze the current outline structure, identifying strengths and areas for improvement.
-- Assess whether the outline contains all essential survey paper components.
-- Evaluate the logical flow and structural organization for paper writing effectiveness.
-- Present your analysis in the thinking part.
-
-**Step 2: Refine the Outline**
-Transform the outline into a publication-ready survey paper structure. Apply the following principles:
-1. **Stability First**
-   - Preserve all technical knowledge and findings; do not invent or delete without justification.
-   - Make **conservative, incremental changes** (merge, split, reorder) only when they improve balance or clarity.
-2. **Essential Components**
-   - Ensure coverage of standard survey parts: **Introduction, Background/Related Work, Core Research Sections, Open Challenges/Future Directions, Conclusion**.
-   - Do not duplicate roles (e.g., “Overview” vs “Introduction”).
-3. **Structural Refinement**
-   - Favor **merging or reordering** over deletion.
-   - Always keep **Background/Related Work** directly after Introduction.
-   - Respect {max_sections} limit for main research sections (excluding Intro/Background/Challenges/Conclusion).
-4. **Balance & Coherence**
-   - Avoid one section dominating (>40% of subsections).
-   - Each section should contain **3–6 subsections**; split or promote if overloaded.
-   - Ensure smooth logical flow: general → specific, foundations → applications, present → future.
-5. **Description Enhancement**
-   - Each section/subsection must use **numbered bullet points (≥3)**.
-   - Write **knowledge-dense, domain-specific insights** with parallel/progressive structure.
-6. **Writing-Readiness**
-   - Each section/subsection must provide **clear writing objectives** for drafting.
-   - Ensure comprehensive coverage of central and emerging areas without redundancy.
-
-**Step 3: Record Changes**
-- Provide a clear changelog of what was merged, split, reorganized, or added (e.g., "Moved subsection X under section Y", "Added 'Future Directions' section", "Merged A and B into C").
-- If no changes were needed, explicitly state "No structural changes required."
-
-</instruction>
-
-<output_format>
-{{
-  "thinking": "Deep analysis of the current outline and justification for structural refinements",
-  "change_log": [
-    "Added Introduction section",
-    "Merged 'xxx' and 'xxx' into one subsection",
-    "Reorganized 'xxx' into three thematic clusters",
-    ...
-  ],
-  "outline": [
-    {{
-      "name": "Section Name 1",
-      "description": "A detailed description of the section's scope using numbered bullet point format (1. 2. 3. ...) with clear structural organization",
-      "subsections": [
-        {{
-          "name": "Subsection Name 1.1",
-          "description": "A detailed description of the subsection's scope using numbered bullet point format (1. 2. 3. ...)"
-        }},
-        {{
-          "name": "Subsection Name 1.2",
-          "description": "A detailed description of the subsection's scope using numbered bullet point format (1. 2. 3. ...)"
-        }},
-        {{
-          "name": "Subsection Name 1.3",
-          "description": "A detailed description of the subsection's scope using numbered bullet point format (1. 2. 3. ...)"
-        }},
-        ...
-      ]
-    }},
-    {{
-      "name": "Section Name 2",
-      "description": "A detailed description of the section's scope using numbered bullet point format (1. 2. 3. ...) with clear structural organization",
-      "subsections": [
-        {{
-          "name": "Subsection Name 2.1",
-          "description": "A detailed description of the subsection's scope using numbered bullet point format (1. 2. 3. ...)"
-        }},
-        {{
-          "name": "Subsection Name 2.2",
-          "description": "A detailed description of the subsection's scope using numbered bullet point format (1. 2. 3. ...)"
-        }},
-        {{
-          "name": "Subsection Name 2.3",
-          "description": "A detailed description of the subsection's scope using numbered bullet point format (1. 2. 3. ...)"
-        }},
-        ...
-      ]
-    }},
-    ...
-  ]
-}}
-</output_format>
-
-Now carefully refine the outline to create a well-structured, publication-ready survey framework."""
 
 POST_PAPER_MAPPING_PROMPT = """You are an expert research assistant tasked with mapping analyzed papers to the most relevant sections of a survey outline after outline generation is complete.
 

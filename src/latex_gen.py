@@ -438,7 +438,10 @@ def generate_latex_code(survey, latex_path, api_model, db):
         f.write(document_tail)
     section_latex_list = []
 
-    for section_idx, section in enumerate(survey.sections):
+    # 并行生成各节的 LaTeX 内容，保持输出顺序不变
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _process_single_section(section_idx, section):
         print(f"Generating latex code for section {section_idx}...")
         section_title_w_fig = f"## {section.title}\n\n"
         if section.figs:
@@ -492,7 +495,19 @@ def generate_latex_code(survey, latex_path, api_model, db):
 
         section_content_latex = extract_latex_code(response)
 
-        section_latex_list.append(section_content_latex)
+        return section_idx, section_content_latex
+
+    futures = []
+    ordered_results = {i: None for i in range(len(survey.sections))}
+    with ThreadPoolExecutor(max_workers=min(8, max(1, os.cpu_count() or 4))) as executor:
+        for section_idx, section in enumerate(survey.sections):
+            futures.append(executor.submit(_process_single_section, section_idx, section))
+        for future in as_completed(futures):
+            idx, content_latex = future.result()
+            ordered_results[idx] = content_latex
+
+    for i in range(len(survey.sections)):
+        section_latex_list.append(ordered_results[i])
 
     latex_code = '\n\n'.join(section_latex_list)
 

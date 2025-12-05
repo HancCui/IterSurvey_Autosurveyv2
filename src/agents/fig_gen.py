@@ -79,6 +79,9 @@ class FigGenerator():
         self.input_token_usage, self.output_token_usage = 0, 0
 
 
+    def get_usage(self):
+        return self.api_model.token_counter.get_total_usage()
+    
     def __generate_prompt(self, template, paras):
         """
         Generate a prompt by replacing placeholders in the template with actual values from paras.
@@ -399,6 +402,68 @@ class FigGenerator():
     #     survey.sections = refined_sections
     #     return survey
 
+    def _process_single_section_for_figures(self, section_id, section, global_visualization_needs_map, output_path):
+        """处理单个 section 的图表生成（用于多线程）"""
+        if section_id == 0:
+            return None
+        
+        subsection_name_list = [section.title] + [subsection.title for subsection in section.subsections]
+        visualization_needs_section = []
+        for subsection_name in subsection_name_list:
+            matches = get_close_matches(
+                subsection_name,
+                global_visualization_needs_map.keys(),
+                n=1,
+                cutoff=0.8
+            )
+
+            if matches:
+                matched_target = matches[0]
+                visualization_needs = global_visualization_needs_map[matched_target]
+                visualization_needs_section.extend(visualization_needs)
+
+        if len(visualization_needs_section) == 0:
+            return None
+
+        figs, tables, mermaid_codes = [], [], []
+        for visualization_need in visualization_needs_section:
+            if visualization_need.type == "figure":
+                target = visualization_need.target
+                mermaid_code, caption, label = self.generate_sub_fig_single_subsection(section.to_content_str(), visualization_need, max_retries=3)
+                if mermaid_code:
+                    output_file = os.path.join(output_path, f"{label}.png")
+                    png_data, success = render_mermaid_with_python(mermaid_code, output_file)
+                    if success:
+                        latex_code = generate_figure_latex_code(output_file, caption, label)
+                        figs.append((latex_code, caption, label, target))
+                        mermaid_codes.append(mermaid_code)
+            elif visualization_need.type == "table":
+                target = visualization_need.target
+                latex_code, caption, label = self.generate_sub_table_single_subsection(section.to_content_str(), visualization_need, max_retries=3)
+                if latex_code:
+                    tables.append((latex_code, caption, label, target))
+
+        if not (figs or tables):
+            return None
+
+        # 尝试增强内容
+        enhanced_content = None
+        for _ in range(3):
+            try:
+                enhanced_content = self.enhance_section_content(section.to_content_str(), figs, tables, max_retries=3)
+                break
+            except Exception as e:
+                print(f"Error: {e} when enhancing section {section.title}")
+                continue
+        
+        return {
+            'section_id': section_id,
+            'figs': figs,
+            'tables': tables,
+            'mermaid_codes': mermaid_codes,
+            'enhanced_content': enhanced_content
+        }
+
     def refine_survey(self, survey, topic, output_path="./output/cache"):
         survey = self.generate_summary_figure_latex(topic, survey)
 
@@ -417,65 +482,50 @@ class FigGenerator():
                 global_visualization_needs_map[visualization_need.target] = []
             global_visualization_needs_map[visualization_need.target].append(visualization_need)
 
-        for section_id, section in tqdm(enumerate(survey.sections), desc="Generating fig/tabs"):
-            if section_id == 0:
-                continue
-            subsection_name_list = [section.title] + [subsection.title for subsection in section.subsections]
-            visualization_needs_section = []
-            for subsection_name in subsection_name_list:
-                matches = get_close_matches(
-                    subsection_name,
-                    global_visualization_needs_map.keys(),
-                    n=1,
-                    cutoff=0.8
+        # 使用多线程并行处理所有 sections
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        futures = []
+        # with ThreadPoolExecutor(max_workers=min(6, max(1, os.cpu_count() or 4))) as executor:
+        with ThreadPoolExecutor(max_workers=128) as executor:
+            for section_id, section in enumerate(survey.sections):
+                future = executor.submit(
+                    self._process_single_section_for_figures,
+                    section_id,
+                    section,
+                    global_visualization_needs_map,
+                    output_path
                 )
-
-                if matches:
-                    matched_target = matches[0]
-                    visualization_needs = global_visualization_needs_map[matched_target]
-                    visualization_needs_section.extend(visualization_needs)
-
-            if len(visualization_needs_section) == 0:
-                continue
-
-            figs, tables, mermaid_codes = [], [], []
-            for visualization_need in visualization_needs_section:
-                if visualization_need.type == "figure":
-                    target = visualization_need.target
-                    mermaid_code, caption, label = self.generate_sub_fig_single_subsection(section.to_content_str(), visualization_need, max_retries=3)
-                    if mermaid_code:
-                        # output_file = f"{output_path}/{label}.png"
-                        output_file = os.path.join(output_path, f"{label}.png")
-                        png_data, success = render_mermaid_with_python(mermaid_code, output_file)
-                        if success:
-                            latex_code = generate_figure_latex_code(output_file, caption, label)
-                            figs.append((latex_code, caption, label, target))
-                            mermaid_codes.append(mermaid_code)
-                elif visualization_need.type == "table":
-                    target = visualization_need.target
-                    latex_code, caption, label = self.generate_sub_table_single_subsection(section.to_content_str(), visualization_need, max_retries=3)
-                    if latex_code:
-                        tables.append((latex_code, caption, label, target))
-
-            section.mermaid_code = mermaid_codes
-            if figs or tables:
-                for _ in range(3):
-                    try:
-                        enhanced_content = self.enhance_section_content(section.to_content_str(), figs, tables, max_retries=3)
-                        section.content = enhanced_content.content
-                        if section.subsections:
-                            assert len(section.subsections) == len(enhanced_content.subsections), f"Section {section.title} has {len(section.subsections)} subsections, but enhanced content has {len(enhanced_content.subsections)} subsections"
+                futures.append(future)
+            
+            # 使用 tqdm 显示进度
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Generating fig/tabs"):
+                result = future.result()
+                if result is None:
+                    continue
+                
+                section_id = result['section_id']
+                section = survey.sections[section_id]
+                figs = result['figs']
+                tables = result['tables']
+                mermaid_codes = result['mermaid_codes']
+                enhanced_content = result['enhanced_content']
+                
+                # 更新 section
+                section.mermaid_code = mermaid_codes
+                if enhanced_content:
+                    section.content = enhanced_content.content
+                    if section.subsections and enhanced_content.subsections:
+                        if len(section.subsections) == len(enhanced_content.subsections):
                             for subsec_idx in range(len(section.subsections)):
                                 section.subsections[subsec_idx].content = enhanced_content.subsections[subsec_idx].content
-                        for latex_code, caption, label, target in figs:
-                            section.figs[label] = latex_code
-                        for latex_code, caption, label, target in tables:
-                            section.tables[label] = latex_code
-                        break
-                    except Exception as e:
-                        print(f"Error: {e} when enhancing section {section.title}")
-                        continue
-
+                        else:
+                            print(f"Warning: Section {section.title} has {len(section.subsections)} subsections, but enhanced content has {len(enhanced_content.subsections)} subsections")
+                    
+                    for latex_code, caption, label, target in figs:
+                        section.figs[label] = latex_code
+                    for latex_code, caption, label, target in tables:
+                        section.tables[label] = latex_code
 
         return survey
 
